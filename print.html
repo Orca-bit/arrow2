@@ -139,11 +139,13 @@
 <p>Arrow2 is a Rust library that implements data structures and functionality enabling
 interoperability with the arrow format.</p>
 <p>The typical use-case for this library is to perform CPU and memory-intensive analytics in a format that supports heterogeneous data structures, null values, and IPC and FFI interfaces across languages.</p>
-<p>Arrow2 is divided into three main parts: </p>
+<p>Arrow2 is divided into 5 main parts: </p>
 <ul>
 <li>a <a href="./low_level.html">low-level API</a> to efficiently operate with contiguous memory regions;</li>
 <li>a <a href="./high_level.html">high-level API</a> to operate with arrow arrays;</li>
-<li>a <a href="./metadata.html">metadata API</a> to declare and operate with logical types and metadata.</li>
+<li>a <a href="./metadata.html">metadata API</a> to declare and operate with logical types and metadata;</li>
+<li>a <a href="./compute.html">compute API</a> with operators to operate over arrays;</li>
+<li>an <a href="./io/README.html">IO API</a> with interfaces to read from, and write to, other formats.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="introduction"><a class="header" href="#introduction">Introduction</a></h1>
 <p>Welcome to the Arrow2 guide for the Rust programming language. This guide was
@@ -242,7 +244,7 @@ to construct, share and query Arrow arrays.</p>
 <p>The most important design aspect of this crate is that contiguous regions are shared via an
 <code>Arc</code>. In this context, the operation of slicing a memory region is <code>O(1)</code> because it
 corresponds to changing an offset and length. The tradeoff is that once under
-an <code>Arc</code>, memory regions are immutable.</p>
+an <code>Arc</code>, memory regions are immutable. See note below on how to overcome this.</p>
 <p>The second most important aspect is that Arrow has two main types of data buffers: bitmaps,
 whose offsets are measured in bits, and byte types (such as <code>i32</code>), whose offsets are
 measured in bytes. With this in mind, this crate has 2 main types of containers of
@@ -284,7 +286,8 @@ types supported by arrow are built on top of these types, which enables Arrow to
 interoperable in-memory format.</p>
 <h2 id="bitmaps"><a class="header" href="#bitmaps">Bitmaps</a></h2>
 <p>Arrow's in-memory arrangement of boolean values is different from <code>Vec&lt;bool&gt;</code>. Specifically,
-arrow uses individual bits to represent a boolean, as opposed to the usual byte that <code>bool</code> holds.
+arrow uses individual bits to represent a boolean, as opposed to the usual byte
+that <code>bool</code> holds.
 Besides the 8x compression, this makes the validity particularly useful for 
 <a href="https://en.wikipedia.org/wiki/AVX-512">AVX512</a> masks.
 One tradeoff is that an arrows' bitmap is not represented as a Rust slice, as Rust slices use
@@ -310,13 +313,17 @@ x.set(1, true);
 assert_eq!(x.get(1), true);
 <span class="boring">}
 </span></code></pre></pre>
+<h2 id="copy-on-write-cow-semantics"><a class="header" href="#copy-on-write-cow-semantics">Copy on write (COW) semantics</a></h2>
+<p>Both <code>Buffer</code> and <code>Bitmap</code> support copy on write semantics via <code>into_mut</code>, that may convert
+them to a <code>Vec</code> or <code>MutableBitmap</code> respectively.</p>
+<p>This allows re-using them to e.g. perform multiple operations without allocations.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="high-level-api"><a class="header" href="#high-level-api">High-level API</a></h1>
 <p>Arrow core trait the <code>Array</code>, which you can think of as representing <code>Arc&lt;Vec&lt;Option&lt;T&gt;&gt;</code>
 with associated metadata (see <a href="../metadata.html">metadata</a>)).
 Contrarily to <code>Arc&lt;Vec&lt;Option&lt;T&gt;&gt;</code>, arrays in this crate are represented in such a way
 that they can be zero-copied to any other Arrow implementation via foreign interfaces (FFI).</p>
 <p>Probably the simplest <code>Array</code> in this crate is the <code>PrimitiveArray&lt;T&gt;</code>. It can be
-constructed as from a slice of option values,</p>
+constructed from a slice of option values,</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">use arrow2::array::{Array, PrimitiveArray};
 </span><span class="boring">fn main() {
 </span>let array = PrimitiveArray::&lt;i32&gt;::from([Some(1), None, Some(123)]);
@@ -337,13 +344,13 @@ assert_eq!(array.len(), 3)
 assert_eq!(array.len(), 3)
 <span class="boring">}
 </span></code></pre></pre>
-<p>A <code>PrimitiveArray</code> has 3 components:</p>
+<p>A <code>PrimitiveArray</code> (and every <code>Array</code> implemented in this crate) has 3 components:</p>
 <ol>
 <li>A physical type (e.g. <code>i32</code>)</li>
 <li>A logical type (e.g. <code>DataType::Int32</code>)</li>
 <li>Data</li>
 </ol>
-<p>The main differences from a <code>Vec&lt;Option&lt;T&gt;&gt;</code> are:</p>
+<p>The main differences from a <code>Arc&lt;Vec&lt;Option&lt;T&gt;&gt;&gt;</code> are:</p>
 <ul>
 <li>Its data is laid out in memory as a <code>Buffer&lt;T&gt;</code> and an <code>Option&lt;Bitmap&gt;</code> (see [../low_level.md])</li>
 <li>It has an associated logical type (<code>DataType</code>).</li>
@@ -378,15 +385,15 @@ assert_eq!(array.data_type(), &amp;DataType::Int32);
 <li><code>Utf8Array&lt;i32&gt;</code> and <code>Utf8Array&lt;i64&gt;</code> (for strings)</li>
 <li><code>BinaryArray&lt;i32&gt;</code> and <code>BinaryArray&lt;i64&gt;</code> (for opaque binaries)</li>
 <li><code>FixedSizeBinaryArray</code> (like <code>BinaryArray</code>, but fixed size)</li>
-<li><code>ListArray&lt;i32&gt;</code> and <code>ListArray&lt;i64&gt;</code> (nested arrays)</li>
-<li><code>FixedSizeListArray</code> (nested arrays of fixed size)</li>
-<li><code>StructArray</code> (every row has multiple logical types)</li>
+<li><code>ListArray&lt;i32&gt;</code> and <code>ListArray&lt;i64&gt;</code> (array of arrays)</li>
+<li><code>FixedSizeListArray</code> (array of arrays of a fixed size)</li>
+<li><code>StructArray</code> (multiple named arrays where each row has one element from each array)</li>
 <li><code>UnionArray</code> (every row has a different logical type)</li>
 <li><code>DictionaryArray&lt;K&gt;</code> (nested array with encoded values)</li>
 </ul>
 <h2 id="array-as-a-trait-object"><a class="header" href="#array-as-a-trait-object">Array as a trait object</a></h2>
 <p><code>Array</code> is object safe, and all implementations of <code>Array</code> and can be casted
-to <code>&amp;dyn Array</code>, which enables run-time nesting.</p>
+to <code>&amp;dyn Array</code>, which enables dynamic casting and run-time nesting.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">use arrow2::array::{Array, PrimitiveArray};
 </span><span class="boring">fn main() {
 </span>let a = PrimitiveArray::&lt;i32&gt;::from(&amp;[Some(1), None]);
@@ -458,8 +465,8 @@ and how to make them even more efficient.</p>
 <p>This crate's APIs are generally split into two patterns: whether an operation leverages
 contiguous memory regions or whether it does not.</p>
 <p>What this means is that certain operations can be performed irrespectively of whether a value
-is &quot;null&quot; or not (e.g. <code>PrimitiveArray&lt;i32&gt; + i32</code> can be applied to <em>all</em> values via SIMD and 
-only copy the validity bitmap independently).</p>
+is &quot;null&quot; or not (e.g. <code>PrimitiveArray&lt;i32&gt; + i32</code> can be applied to <em>all</em> values
+via SIMD and only copy the validity bitmap independently).</p>
 <p>When an operation benefits from such arrangement, it is advantageous to use</p>
 <ul>
 <li><code>Buffer::from_iter</code></li>
@@ -501,10 +508,12 @@ a contiguous in-memory representation, while <code>iter()</code> returns items t
 To get an iterator over contiguous values, use <code>array.values().iter()</code>.</p>
 <p>There is one last API that is worth mentioning, and that is <code>Bitmap::chunks</code>. When performing
 bitwise operations, it is often more performant to operate on chunks of bits
-instead of single bits. <code>chunks</code> offers a <code>TrustedLen</code> of <code>u64</code> with the bits
-+ an extra <code>u64</code> remainder. We expose two functions, <code>unary(Bitmap, Fn) -&gt; Bitmap</code>
+instead of single bits. <code>chunks</code> offers a <code>TrustedLen</code> of <code>u64</code> with the bits</p>
+<ul>
+<li>an extra <code>u64</code> remainder. We expose two functions, <code>unary(Bitmap, Fn) -&gt; Bitmap</code>
 and <code>binary(Bitmap, Bitmap, Fn) -&gt; Bitmap</code> that use this API to efficiently
-perform bitmap operations.</p>
+perform bitmap operations.</li>
+</ul>
 <h2 id="vectorized-operations"><a class="header" href="#vectorized-operations">Vectorized operations</a></h2>
 <p>One of the main advantages of the arrow format and its memory layout is that
 it often enables SIMD. For example, an unary operation <code>op</code> on a <code>PrimitiveArray</code>
@@ -728,20 +737,18 @@ use std::sync::Arc;
 
 unsafe fn export(
     array: Arc&lt;dyn Array&gt;,
-    array_ptr: *mut ffi::Ffi_ArrowArray,
-    schema_ptr: *mut ffi::Ffi_ArrowSchema,
+    array_ptr: *mut ffi::ArrowArray,
+    schema_ptr: *mut ffi::ArrowSchema,
 ) {
+    // exporting an array requires an associated field so that the consumer knows its datatype
     let field = Field::new(&quot;a&quot;, array.data_type().clone(), true);
     ffi::export_array_to_c(array, array_ptr);
     ffi::export_field_to_c(&amp;field, schema_ptr);
 }
 
-unsafe fn import(
-    array: Box&lt;ffi::Ffi_ArrowArray&gt;,
-    schema: &amp;ffi::Ffi_ArrowSchema,
-) -&gt; Result&lt;Box&lt;dyn Array&gt;&gt; {
+unsafe fn import(array: Box&lt;ffi::ArrowArray&gt;, schema: &amp;ffi::ArrowSchema) -&gt; Result&lt;Box&lt;dyn Array&gt;&gt; {
     let field = ffi::import_field_from_c(schema)?;
-    ffi::import_array_from_c(array, &amp;field)
+    ffi::import_array_from_c(array, field.data_type)
 }
 
 fn main() -&gt; Result&lt;()&gt; {
@@ -750,23 +757,13 @@ fn main() -&gt; Result&lt;()&gt; {
 
     // the goal is to export this array and import it back via FFI.
     // to import, we initialize the structs that will receive the data
-    let array_ptr = Box::new(ffi::Ffi_ArrowArray::empty());
-    let schema_ptr = Box::new(ffi::Ffi_ArrowSchema::empty());
-
-    // since FFIs work in raw pointers, let's temporarily relinquish ownership so that producers
-    // can write into it in a thread-safe manner
-    let array_ptr = Box::into_raw(array_ptr);
-    let schema_ptr = Box::into_raw(schema_ptr);
+    let mut array_ptr = Box::new(ffi::ArrowArray::empty());
+    let mut schema_ptr = Box::new(ffi::ArrowSchema::empty());
 
     // this is where a producer (in this case also us ^_^) writes to the pointers' location.
     // `array` here could be anything or not even be available, if this was e.g. from Python.
-    // Safety: we just allocated the pointers correctly.
-    unsafe { export(array.clone(), array_ptr, schema_ptr) };
-
-    // we can now take ownership back, since we are responsible for deallocating this memory.
-    // Safety: we just into_raw them.
-    let array_ptr = unsafe { Box::from_raw(array_ptr) };
-    let schema_ptr = unsafe { Box::from_raw(schema_ptr) };
+    // Safety: we just allocated the pointers
+    unsafe { export(array.clone(), &amp;mut *array_ptr, &amp;mut *schema_ptr) };
 
     // and finally interpret the written memory into a new array.
     // Safety: we used `export`, which is a valid exporter to the C data interface
@@ -847,6 +844,7 @@ fn read_ipc(buf: &amp;[u8]) -&gt; Result&lt;Chunk&lt;Arc&lt;dyn Array&gt;&gt;&gt
 <li>Parquet (<code>io_parquet</code>)</li>
 <li>JSON and NDJSON (<code>io_json</code>)</li>
 <li>Avro (<code>io_avro</code> and <code>io_avro_async</code>)</li>
+<li>ODBC-compliant databases (<code>io_odbc</code>)</li>
 </ul>
 <p>In this section you can find a guide and examples for each one of them.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="csv-reader"><a class="header" href="#csv-reader">CSV reader</a></h1>
@@ -1047,14 +1045,14 @@ delay any data transformation.</p>
 };
 
 fn write_batch&lt;A: AsRef&lt;dyn Array&gt;&gt;(path: &amp;str, columns: &amp;[Chunk&lt;A&gt;]) -&gt; Result&lt;()&gt; {
-    let writer = &amp;mut write::WriterBuilder::new().from_path(path)?;
-
-    write::write_header(writer, &amp;[&quot;c1&quot;])?;
+    let mut writer = std::fs::File::create(path)?;
 
     let options = write::SerializeOptions::default();
+    write::write_header(&amp;mut writer, &amp;[&quot;c1&quot;], &amp;options)?;
+
     columns
         .iter()
-        .try_for_each(|batch| write::write_chunk(writer, batch, &amp;options))
+        .try_for_each(|batch| write::write_chunk(&amp;mut writer, batch, &amp;options))
 }
 
 fn main() -&gt; Result&lt;()&gt; {
@@ -1077,7 +1075,8 @@ fn main() -&gt; Result&lt;()&gt; {
 <p>In the example above, the serialization and writing to a file is done synchronously.
 However, these typically deal with different bounds: serialization is often CPU bounded, while writing is often IO bounded. We can trade-off these through a higher memory usage.</p>
 <p>Suppose that we know that we are getting CPU-bounded at serialization, and would like to offload that workload to other threads, at the cost of a higher memory usage. We would achieve this as follows (two batches for simplicity):</p>
-<pre><pre class="playground"><code class="language-rust">use std::sync::mpsc;
+<pre><pre class="playground"><code class="language-rust">use std::io::Write;
+use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -1093,8 +1092,8 @@ fn parallel_write(path: &amp;str, batches: [Chunk&lt;Arc&lt;dyn Array&gt;&gt;; 2
     let options = write::SerializeOptions::default();
 
     // write a header
-    let writer = &amp;mut write::WriterBuilder::new().from_path(path)?;
-    write::write_header(writer, &amp;[&quot;c1&quot;])?;
+    let mut writer = std::fs::File::create(path)?;
+    write::write_header(&amp;mut writer, &amp;[&quot;c1&quot;], &amp;options)?;
 
     // prepare a channel to send serialized records from threads
     let (tx, rx): (Sender&lt;_&gt;, Receiver&lt;_&gt;) = mpsc::channel();
@@ -1107,8 +1106,8 @@ fn parallel_write(path: &amp;str, batches: [Chunk&lt;Arc&lt;dyn Array&gt;&gt;; 2
         let options = options.clone();
         let batch = batches[id].clone(); // note: this is cheap
         let child = thread::spawn(move || {
-            let records = write::serialize(&amp;batch, &amp;options).unwrap();
-            thread_tx.send(records).unwrap();
+            let rows = write::serialize(&amp;batch, &amp;options).unwrap();
+            thread_tx.send(rows).unwrap();
         });
 
         children.push(child);
@@ -1117,9 +1116,7 @@ fn parallel_write(path: &amp;str, batches: [Chunk&lt;Arc&lt;dyn Array&gt;&gt;; 2
     for _ in 0..2 {
         // block: assumes that the order of batches matter.
         let records = rx.recv().unwrap();
-        records
-            .iter()
-            .try_for_each(|record| writer.write_byte_record(record))?
+        records.iter().try_for_each(|row| writer.write_all(&amp;row))?
     }
 
     for child in children {
@@ -1156,57 +1153,6 @@ It makes minimal assumptions on how you to decompose CPU and IO intensive tasks.
 </ul>
 <p>Here is how to read a single column chunk from a single row group:</p>
 <pre><pre class="playground"><code class="language-rust">use std::fs::File;
-use std::io::BufReader;
-
-use arrow2::io::parquet::read;
-use arrow2::{array::Array, error::Result};
-
-fn read_field(path: &amp;str, row_group: usize, field: usize) -&gt; Result&lt;Box&lt;dyn Array&gt;&gt; {
-    // Open a file, a common operation in Rust
-    let mut file = BufReader::new(File::open(path)?);
-
-    // Read the files' metadata. This has a small IO cost because it requires seeking to the end
-    // of the file to read its footer.
-    let metadata = read::read_metadata(&amp;mut file)?;
-
-    // Convert the files' metadata into an arrow schema. This is CPU-only and amounts to
-    // parse thrift if the arrow format is available on a key, or infering the arrow schema from
-    // the parquet's physical, converted and logical types.
-    let arrow_schema = read::get_schema(&amp;metadata)?;
-
-    // Created an iterator of column chunks. Each iteration
-    // yields an iterator of compressed pages. There is almost no CPU work in iterating.
-    let columns = read::get_column_iterator(&amp;mut file, &amp;metadata, row_group, field, None, vec![]);
-
-    // get the columns' field
-    let field = &amp;arrow_schema.fields[field];
-
-    // This is the actual work. In this case, pages are read and
-    // decompressed, decoded and deserialized to arrow.
-    // Because `columns` is an iterator, it uses a combination of IO and CPU.
-    let (array, _, _) = read::column_iter_to_array(columns, field, vec![])?;
-
-    Ok(array)
-}
-
-fn main() -&gt; Result&lt;()&gt; {
-    use std::env;
-    let args: Vec&lt;String&gt; = env::args().collect();
-
-    let file_path = &amp;args[1];
-    let field = args[2].parse::&lt;usize&gt;().unwrap();
-    let row_group = args[3].parse::&lt;usize&gt;().unwrap();
-
-    let array = read_field(file_path, row_group, field)?;
-    println!(&quot;{:?}&quot;, array);
-    Ok(())
-}
-</code></pre></pre>
-<p>The example above minimizes memory usage at the expense of mixing IO and CPU tasks
-on the same thread, which may hurt performance if one of them is a bottleneck.</p>
-<p>For single-threaded reading, buffers used to read and decompress pages can be re-used.
-This create offers an API that encapsulates the above logic:</p>
-<pre><pre class="playground"><code class="language-rust">use std::fs::File;
 use std::time::SystemTime;
 
 use arrow2::error::Result;
@@ -1219,7 +1165,7 @@ fn main() -&gt; Result&lt;()&gt; {
     let file_path = &amp;args[1];
 
     let reader = File::open(file_path)?;
-    let reader = read::RecordReader::try_new(reader, None, None, None, None)?;
+    let reader = read::FileReader::try_new(reader, None, None, None, None)?;
 
     let start = SystemTime::now();
     for maybe_chunk in reader {
@@ -1230,6 +1176,16 @@ fn main() -&gt; Result&lt;()&gt; {
     Ok(())
 }
 </code></pre></pre>
+<p>The example above minimizes memory usage at the expense of mixing IO and CPU tasks
+on the same thread, which may hurt performance if one of them is a bottleneck.</p>
+<p>For single-threaded reading, buffers used to read and decompress pages can be re-used.
+This create offers an API that encapsulates the above logic:</p>
+<pre><pre class="playground"><code class="language-rust">
+<span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>{{#include ../../../examples/parquet_read_record.rs}}
+<span class="boring">}
+</span></code></pre></pre>
 <h3 id="parallelism-decoupling-of-cpu-from-io"><a class="header" href="#parallelism-decoupling-of-cpu-from-io">Parallelism decoupling of CPU from IO</a></h3>
 <p>One important aspect of the pages created by the iterator above is that they can cross
 thread boundaries. Consequently, the thread reading pages from a file (IO-bounded)
@@ -1238,125 +1194,56 @@ decoding, etc.).</p>
 <p>The example below assumes that CPU starves the consumption of pages,
 and that it is advantageous to have a single thread performing all IO-intensive work,
 by delegating all CPU-intensive tasks to separate threads.</p>
-<pre><pre class="playground"><code class="language-rust">use std::fs::File;
-use std::sync::Arc;
-use std::thread;
-use std::time::SystemTime;
-
-use crossbeam_channel::unbounded;
-
-use arrow2::{
-    array::Array, chunk::Chunk, error::Result, io::parquet::read,
-    io::parquet::read::MutStreamingIterator,
-};
-
-fn parallel_read(path: &amp;str, row_group: usize) -&gt; Result&lt;Chunk&lt;Arc&lt;dyn Array&gt;&gt;&gt; {
-    // prepare a channel to send compressed pages across threads.
-    let (tx, rx) = unbounded();
-
-    let mut file = File::open(path)?;
-    let file_metadata = read::read_metadata(&amp;mut file)?;
-    let arrow_schema = Arc::new(read::get_schema(&amp;file_metadata)?);
-
-    let start = SystemTime::now();
-    // spawn a thread to produce `Vec&lt;CompressedPage&gt;` (IO bounded)
-    let producer = thread::spawn(move || {
-        for (field_i, field) in file_metadata.schema().fields().iter().enumerate() {
-            let start = SystemTime::now();
-
-            let mut columns = read::get_column_iterator(
-                &amp;mut file,
-                &amp;file_metadata,
-                row_group,
-                field_i,
-                None,
-                vec![],
-            );
-
-            println!(&quot;produce start - field: {}&quot;, field_i);
-
-            let mut column_chunks = vec![];
-            while let read::State::Some(mut new_iter) = columns.advance().unwrap() {
-                if let Some((pages, metadata)) = new_iter.get() {
-                    let pages = pages.collect::&lt;Vec&lt;_&gt;&gt;();
-
-                    column_chunks.push((pages, metadata.clone()));
-                }
-                columns = new_iter;
-            }
-            // todo: create API to allow sending each column (and not column chunks) to be processed in parallel
-            tx.send((field_i, field.clone(), column_chunks)).unwrap();
-            println!(
-                &quot;produce end - {:?}: {} {}&quot;,
-                start.elapsed().unwrap(),
-                field_i,
-                row_group
-            );
-        }
-    });
-
-    // use 2 consumers for CPU-intensive to decompress, decode and deserialize.
-    #[allow(clippy::needless_collect)] // we need to collect to parallelize
-    let consumers = (0..2)
-        .map(|i| {
-            let rx_consumer = rx.clone();
-            let arrow_schema_consumer = arrow_schema.clone();
-            thread::spawn(move || {
-                let mut arrays = vec![];
-                while let Ok((field_i, parquet_field, column_chunks)) = rx_consumer.recv() {
-                    let start = SystemTime::now();
-                    let field = &amp;arrow_schema_consumer.fields[field_i];
-                    println!(&quot;consumer {} start - {}&quot;, i, field_i);
-
-                    let columns = read::ReadColumnIterator::new(parquet_field, column_chunks);
-
-                    let array = read::column_iter_to_array(columns, field, vec![]).map(|x| x.0);
-                    println!(
-                        &quot;consumer {} end - {:?}: {}&quot;,
-                        i,
-                        start.elapsed().unwrap(),
-                        field_i
-                    );
-
-                    arrays.push((field_i, array))
-                }
-                arrays
-            })
-        })
-        .collect::&lt;Vec&lt;_&gt;&gt;();
-
-    producer.join().expect(&quot;producer thread panicked&quot;);
-
-    // collect all columns (join threads)
-    let mut columns = consumers
-        .into_iter()
-        .map(|x| x.join().unwrap())
-        .flatten()
-        .map(|x| Ok((x.0, x.1?)))
-        .collect::&lt;Result&lt;Vec&lt;(usize, Box&lt;dyn Array&gt;)&gt;&gt;&gt;()?;
-    // order may not be the same
-    columns.sort_unstable_by_key(|x| x.0);
-    let columns = columns.into_iter().map(|x| x.1.into()).collect();
-    println!(&quot;Finished - {:?}&quot;, start.elapsed().unwrap());
-
-    Chunk::try_new(columns)
-}
-
-fn main() -&gt; Result&lt;()&gt; {
-    use std::env;
-    let args: Vec&lt;String&gt; = env::args().collect();
-    let file_path = &amp;args[1];
-
-    let start = SystemTime::now();
-    let batch = parallel_read(file_path, 0)?;
-    assert!(!batch.is_empty());
-    println!(&quot;took: {} ms&quot;, start.elapsed().unwrap().as_millis());
-    Ok(())
-}
-</code></pre></pre>
+<pre><pre class="playground"><code class="language-rust">
+<span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>{{#include ../../../examples/parquet_read_parallel.rs}}
+<span class="boring">}
+</span></code></pre></pre>
 <p>This can of course be reversed; in configurations where IO is bounded (e.g. when a
 network is involved), we can use multiple producers of pages, potentially divided
 in file readers, and a single consumer that performs all CPU-intensive work.</p>
+<h2 id="apache-arrow---apache-parquet"><a class="header" href="#apache-arrow---apache-parquet">Apache Arrow &lt;-&gt; Apache Parquet</a></h2>
+<p>Arrow and Parquet are two different formats that declare different physical and logical types.
+When reading Parquet, we must <em>infer</em> to which types we are reading the data to.
+This inference is based on Parquet's physical, logical and converted types.</p>
+<p>When a logical type is defined, we use it as follows:</p>
+<table><thead><tr><th><code>Parquet</code></th><th><code>Parquet logical</code></th><th><code>DataType</code></th></tr></thead><tbody>
+<tr><td>Int32</td><td>Int8</td><td>Int8</td></tr>
+<tr><td>Int32</td><td>Int16</td><td>Int16</td></tr>
+<tr><td>Int32</td><td>Int32</td><td>Int32</td></tr>
+<tr><td>Int32</td><td>UInt8</td><td>UInt8</td></tr>
+<tr><td>Int32</td><td>UInt16</td><td>UInt16</td></tr>
+<tr><td>Int32</td><td>UInt32</td><td>UInt32</td></tr>
+<tr><td>Int32</td><td>Decimal</td><td>Decimal</td></tr>
+<tr><td>Int32</td><td>Date</td><td>Date32</td></tr>
+<tr><td>Int32</td><td>Time(ms)</td><td>Time32(ms)</td></tr>
+<tr><td>Int64</td><td>Int64</td><td>Int64</td></tr>
+<tr><td>Int64</td><td>UInt64</td><td>UInt64</td></tr>
+<tr><td>Int64</td><td>Time(us)</td><td>Time64(us)</td></tr>
+<tr><td>Int64</td><td>Time(ns)</td><td>Time64(ns)</td></tr>
+<tr><td>Int64</td><td>Timestamp(_)</td><td>Timestamp(_)</td></tr>
+<tr><td>Int64</td><td>Decimal</td><td>Decimal</td></tr>
+<tr><td>ByteArray</td><td>Utf8</td><td>Utf8</td></tr>
+<tr><td>ByteArray</td><td>JSON</td><td>Binary</td></tr>
+<tr><td>ByteArray</td><td>BSON</td><td>Binary</td></tr>
+<tr><td>ByteArray</td><td>ENUM</td><td>Binary</td></tr>
+<tr><td>ByteArray</td><td>Decimal</td><td>Decimal</td></tr>
+<tr><td>FixedLenByteArray</td><td>Decimal</td><td>Decimal</td></tr>
+</tbody></table>
+<p>When a a logical type is not defined but a converted type is defined, we use
+the equivalent convertion as above, mutatis mutandis.</p>
+<p>When neither is defined, we fall back to the physical representation:</p>
+<table><thead><tr><th><code>Parquet</code></th><th><code>DataType</code></th></tr></thead><tbody>
+<tr><td>Boolean</td><td>Boolean</td></tr>
+<tr><td>Int32</td><td>Int32</td></tr>
+<tr><td>Int64</td><td>Int64</td></tr>
+<tr><td>Int96</td><td>Timestamp(ns)</td></tr>
+<tr><td>Float</td><td>Float32</td></tr>
+<tr><td>Double</td><td>Float64</td></tr>
+<tr><td>ByteArray</td><td>Binary</td></tr>
+<tr><td>FixedLenByteArray</td><td>FixedSizeBinary</td></tr>
+</tbody></table>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="write-to-parquet"><a class="header" href="#write-to-parquet">Write to Parquet</a></h1>
 <p>When compiled with feature <code>io_parquet</code>, this crate can be used to write parquet files
 from arrow.
@@ -1369,83 +1256,7 @@ as an higher-level API to abstract away some of this work into an easy to use AP
 <li><code>row group</code>: a group of columns with the same length (similar to a <code>Chunk</code> in Arrow)</li>
 </ul>
 <h2 id="single-threaded"><a class="header" href="#single-threaded">Single threaded</a></h2>
-<p>Here is an example of how to write a single column chunk into a single row group:</p>
-<pre><pre class="playground"><code class="language-rust">use std::fs::File;
-use std::iter::once;
-
-use arrow2::error::ArrowError;
-use arrow2::io::parquet::write::to_parquet_schema;
-use arrow2::{
-    array::{Array, Int32Array},
-    datatypes::Field,
-    error::Result,
-    io::parquet::write::{
-        array_to_pages, write_file, Compression, Compressor, DynIter, DynStreamingIterator,
-        Encoding, FallibleStreamingIterator, Version, WriteOptions,
-    },
-};
-
-fn write_single_array(path: &amp;str, array: &amp;dyn Array, field: Field) -&gt; Result&lt;()&gt; {
-    let schema = vec![field].into();
-
-    let options = WriteOptions {
-        write_statistics: true,
-        compression: Compression::Uncompressed,
-        version: Version::V2,
-    };
-    let encoding = Encoding::Plain;
-
-    // map arrow fields to parquet fields
-    let parquet_schema = to_parquet_schema(&amp;schema)?;
-
-    let descriptor = parquet_schema.columns()[0].clone();
-
-    // Declare the row group iterator. This must be an iterator of iterators of streaming iterators
-    // * first iterator over row groups
-    let row_groups = once(Result::Ok(DynIter::new(
-        // * second iterator over column chunks (we assume no struct arrays -&gt; `once` column)
-        once(
-            // * third iterator over (compressed) pages; dictionary encoding may lead to multiple pages per array.
-            array_to_pages(array, descriptor, options, encoding).map(move |pages| {
-                let encoded_pages = DynIter::new(pages.map(|x| Ok(x?)));
-                let compressed_pages = Compressor::new(encoded_pages, options.compression, vec![])
-                    .map_err(ArrowError::from);
-                DynStreamingIterator::new(compressed_pages)
-            }),
-        ),
-    )));
-
-    // Create a new empty file
-    let mut file = File::create(path)?;
-
-    // Write the file. Note that, at present, any error results in a corrupted file.
-    let _ = write_file(
-        &amp;mut file,
-        row_groups,
-        &amp;schema,
-        parquet_schema,
-        options,
-        None,
-    )?;
-    Ok(())
-}
-
-fn main() -&gt; Result&lt;()&gt; {
-    let array = Int32Array::from(&amp;[
-        Some(0),
-        Some(1),
-        Some(2),
-        Some(3),
-        Some(4),
-        Some(5),
-        Some(6),
-    ]);
-    let field = Field::new(&quot;c1&quot;, array.data_type().clone(), true);
-    write_single_array(&quot;test.parquet&quot;, &amp;array, field)
-}
-</code></pre></pre>
-<p>For single-threaded writing, this crate offers an API that encapsulates the above logic. It 
-assumes that a <code>Chunk</code> is mapped to a single row group with a single page per column.</p>
+<p>Here is an example of how to write a single chunk:</p>
 <pre><pre class="playground"><code class="language-rust">use std::fs::File;
 use std::sync::Arc;
 
@@ -1455,7 +1266,7 @@ use arrow2::{
     datatypes::{Field, Schema},
     error::Result,
     io::parquet::write::{
-        write_file, Compression, Encoding, RowGroupIterator, Version, WriteOptions,
+        Compression, Encoding, FileWriter, RowGroupIterator, Version, WriteOptions,
     },
 };
 
@@ -1472,18 +1283,15 @@ fn write_batch(path: &amp;str, schema: Schema, columns: Chunk&lt;Arc&lt;dyn Arra
         RowGroupIterator::try_new(iter.into_iter(), &amp;schema, options, vec![Encoding::Plain])?;
 
     // Create a new empty file
-    let mut file = File::create(path)?;
+    let file = File::create(path)?;
 
-    // Write the file. Note that, at present, any error results in a corrupted file.
-    let parquet_schema = row_groups.parquet_schema().clone();
-    let _ = write_file(
-        &amp;mut file,
-        row_groups,
-        &amp;schema,
-        parquet_schema,
-        options,
-        None,
-    )?;
+    let mut writer = FileWriter::try_new(file, schema, options)?;
+
+    writer.start()?;
+    for group in row_groups {
+        writer.write(group?)?;
+    }
+    let _size = writer.end(None)?;
     Ok(())
 }
 
@@ -1606,10 +1414,16 @@ fn parallel_write(path: &amp;str, schema: &amp;Schema, batches: &amp;[Chunk]) -&
     });
 
     // Create a new empty file
-    let mut file = std::fs::File::create(path)?;
+    let file = std::fs::File::create(path)?;
+
+    let mut writer = FileWriter::try_new(file, schema, options)?;
 
     // Write the file.
-    let _file_size = write_file(&amp;mut file, row_groups, schema, parquet_schema, options, None)?;
+    writer.start()?;
+    for group in row_groups {
+        writer.write(group?)?;
+    }
+    let _size = writer.end(None)?;
 
     Ok(())
 }
@@ -1837,6 +1651,7 @@ async fn main() -&gt; Result&lt;()&gt; {
 
     let (avro_schemas, schema, compression, marker) = read_metadata(&amp;mut reader).await?;
     let avro_schemas = Arc::new(avro_schemas);
+    let projection = Arc::new(schema.fields.iter().map(|_| true).collect::&lt;Vec&lt;_&gt;&gt;());
 
     let blocks = block_stream(&amp;mut reader, marker).await;
 
@@ -1844,11 +1659,12 @@ async fn main() -&gt; Result&lt;()&gt; {
     while let Some(mut block) = blocks.next().await.transpose()? {
         let schema = schema.clone();
         let avro_schemas = avro_schemas.clone();
+        let projection = projection.clone();
         // the content here is CPU-bounded. It should run on a dedicated thread pool
         let handle = tokio::task::spawn_blocking(move || {
             let mut decompressed = Block::new(0, vec![]);
             decompress_block(&amp;mut block, &amp;mut decompressed, compression)?;
-            deserialize(&amp;decompressed, &amp;schema.fields, &amp;avro_schemas)
+            deserialize(&amp;decompressed, &amp;schema.fields, &amp;avro_schemas, &amp;projection)
         });
         let batch = handle.await.unwrap()?;
         assert!(!batch.is_empty());
@@ -1926,51 +1742,43 @@ fn main() -&gt; Result&lt;()&gt; {
 <div style="break-before: page; page-break-before: always;"></div><h1 id="json-read"><a class="header" href="#json-read">JSON read</a></h1>
 <p>When compiled with feature <code>io_json</code>, you can use this crate to read NDJSON files:</p>
 <pre><pre class="playground"><code class="language-rust">use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Seek};
 use std::sync::Arc;
 
 use arrow2::array::Array;
-use arrow2::chunk::Chunk;
 use arrow2::error::Result;
-use arrow2::io::json::read;
+use arrow2::io::ndjson::read;
+use arrow2::io::ndjson::read::FallibleStreamingIterator;
 
-fn read_path(path: &amp;str, projection: Option&lt;Vec&lt;&amp;str&gt;&gt;) -&gt; Result&lt;Chunk&lt;Arc&lt;dyn Array&gt;&gt;&gt; {
-    // Example of reading a NDJSON file.
+fn read_path(path: &amp;str) -&gt; Result&lt;Vec&lt;Arc&lt;dyn Array&gt;&gt;&gt; {
+    let batch_size = 1024; // number of rows per array
     let mut reader = BufReader::new(File::open(path)?);
 
-    let fields = read::infer_and_reset(&amp;mut reader, None)?;
+    let data_type = read::infer(&amp;mut reader, None)?;
+    reader.rewind()?;
 
-    let fields = if let Some(projection) = projection {
-        fields
-            .into_iter()
-            .filter(|field| projection.contains(&amp;field.name.as_ref()))
-            .collect()
-    } else {
-        fields
-    };
+    let mut reader = read::FileReader::new(reader, vec![&quot;&quot;.to_string(); batch_size], None);
 
-    // at most 1024 rows. This container can be re-used across batches.
-    let mut rows = vec![String::default(); 1024];
+    let mut arrays = vec![];
+    // `next` is IO-bounded
+    while let Some(rows) = reader.next()? {
+        // `deserialize` is CPU-bounded
+        let array = read::deserialize(rows, data_type.clone())?;
+        arrays.push(array);
+    }
 
-    // Reads up to 1024 rows.
-    // this is IO-intensive and performs minimal CPU work. In particular,
-    // no deserialization is performed.
-    let read = read::read_rows(&amp;mut reader, &amp;mut rows)?;
-    let rows = &amp;rows[..read];
-
-    // deserialize `rows` into `Chunk`. This is CPU-intensive, has no IO,
-    // and can be performed on a different thread pool via a channel.
-    read::deserialize(rows, &amp;fields)
+    Ok(arrays)
 }
 
 fn main() -&gt; Result&lt;()&gt; {
+    // Example of reading a NDJSON file from a path
     use std::env;
     let args: Vec&lt;String&gt; = env::args().collect();
 
     let file_path = &amp;args[1];
 
-    let batch = read_path(file_path, None)?;
-    println!(&quot;{:#?}&quot;, batch);
+    let arrays = read_path(file_path)?;
+    println!(&quot;{:#?}&quot;, arrays);
     Ok(())
 }
 </code></pre></pre>
@@ -1982,23 +1790,17 @@ use std::io::BufReader;
 use std::sync::Arc;
 
 use arrow2::array::Array;
-use arrow2::error::{ArrowError, Result};
+use arrow2::error::Result;
 use arrow2::io::json::read;
 
 fn read_path(path: &amp;str) -&gt; Result&lt;Arc&lt;dyn Array&gt;&gt; {
     // Example of reading a JSON file.
     let reader = BufReader::new(File::open(path)?);
-    let data = serde_json::from_reader(reader)?;
+    let json = serde_json::from_reader(reader)?;
 
-    let values = if let serde_json::Value::Array(values) = data {
-        Ok(values)
-    } else {
-        Err(ArrowError::InvalidArgumentError(&quot;&quot;.to_string()))
-    }?;
+    let data_type = read::infer(&amp;json)?;
 
-    let data_type = read::infer_rows(&amp;values)?;
-
-    Ok(read::deserialize_json(&amp;values, data_type))
+    read::deserialize(&amp;json, data_type)
 }
 
 fn main() -&gt; Result&lt;()&gt; {
@@ -2012,36 +1814,76 @@ fn main() -&gt; Result&lt;()&gt; {
     Ok(())
 }
 </code></pre></pre>
+<h2 id="metadata-and-inference"><a class="header" href="#metadata-and-inference">Metadata and inference</a></h2>
+<p>This crate uses the following mapping between Arrow's data type and JSON:</p>
+<table><thead><tr><th><code>JSON</code></th><th><code>DataType</code></th></tr></thead><tbody>
+<tr><td>Bool</td><td>Boolean</td></tr>
+<tr><td>Int</td><td>Int64</td></tr>
+<tr><td>Float</td><td>Float64</td></tr>
+<tr><td>String</td><td>Utf8</td></tr>
+<tr><td>List</td><td>List</td></tr>
+<tr><td>Object</td><td>Struct</td></tr>
+</tbody></table>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="write-json"><a class="header" href="#write-json">Write JSON</a></h1>
-<p>When compiled with feature <code>io_json</code>, you can use this crate to write JSON files.
-The following example writes a batch as a JSON file:</p>
+<p>When compiled with feature <code>io_json</code>, you can use this crate to write JSON.
+The following example writes an array to JSON:</p>
 <pre><pre class="playground"><code class="language-rust">use std::fs::File;
-use std::sync::Arc;
 
 use arrow2::{
     array::{Array, Int32Array},
-    chunk::Chunk,
-    error::Result,
+    error::ArrowError,
     io::json::write,
 };
 
-fn write_batches(path: &amp;str, names: Vec&lt;String&gt;, batches: &amp;[Chunk&lt;Arc&lt;dyn Array&gt;&gt;]) -&gt; Result&lt;()&gt; {
+fn write_array(path: &amp;str, array: Box&lt;dyn Array&gt;) -&gt; Result&lt;(), ArrowError&gt; {
     let mut writer = File::create(path)?;
-    let format = write::JsonArray::default();
 
-    let batches = batches.iter().cloned().map(Ok);
+    let arrays = vec![Ok(array)].into_iter();
 
-    // Advancing this iterator serializes the next batch to its internal buffer (i.e. CPU-bounded)
-    let blocks = write::Serializer::new(batches, names, vec![], format);
+    // Advancing this iterator serializes the next array to its internal buffer (i.e. CPU-bounded)
+    let blocks = write::Serializer::new(arrays, vec![]);
 
     // the operation of writing is IO-bounded.
-    write::write(&amp;mut writer, format, blocks)?;
+    write::write(&amp;mut writer, blocks)?;
 
     Ok(())
 }
 
+fn main() -&gt; Result&lt;(), ArrowError&gt; {
+    use std::env;
+    let args: Vec&lt;String&gt; = env::args().collect();
+
+    let file_path = &amp;args[1];
+
+    let array = Int32Array::from(&amp;[Some(0), None, Some(2), Some(3), Some(4), Some(5), Some(6)]);
+
+    write_array(file_path, Box::new(array))
+}
+</code></pre></pre>
+<p>Likewise, you can also use it to write to NDJSON:</p>
+<pre><pre class="playground"><code class="language-rust">use std::fs::File;
+
+use arrow2::array::{Array, Int32Array};
+use arrow2::error::Result;
+use arrow2::io::ndjson::write;
+
+fn write_path(path: &amp;str, array: Box&lt;dyn Array&gt;) -&gt; Result&lt;()&gt; {
+    let writer = File::create(path)?;
+
+    let serializer = write::Serializer::new(vec![Ok(array)].into_iter(), vec![]);
+
+    let mut writer = write::FileWriter::new(writer, serializer);
+    writer.by_ref().collect::&lt;Result&lt;()&gt;&gt;()
+}
+
 fn main() -&gt; Result&lt;()&gt; {
-    let array = Arc::new(Int32Array::from(&amp;[
+    // Example of reading a NDJSON file from a path
+    use std::env;
+    let args: Vec&lt;String&gt; = env::args().collect();
+
+    let file_path = &amp;args[1];
+
+    let array = Box::new(Int32Array::from(&amp;[
         Some(0),
         None,
         Some(2),
@@ -2049,13 +1891,10 @@ fn main() -&gt; Result&lt;()&gt; {
         Some(4),
         Some(5),
         Some(6),
-    ])) as Arc&lt;dyn Array&gt;;
+    ]));
 
-    write_batches(
-        &quot;example.json&quot;,
-        vec![&quot;c1&quot;.to_string()],
-        &amp;[Chunk::new(vec![array.clone()]), Chunk::new(vec![array])],
-    )
+    write_path(file_path, array)?;
+    Ok(())
 }
 </code></pre></pre>
 
